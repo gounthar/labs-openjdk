@@ -1,0 +1,77 @@
+---
+name: Build riscv64
+
+"on":
+  push:
+    branches:
+      - feat/riscv64-ci
+  workflow_dispatch:
+
+jobs:
+  build-riscv64:
+    name: Build labs-openjdk for linux/riscv64
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 300
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install build prerequisites
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y \
+            autoconf make gcc g++ \
+            libx11-dev libxext-dev libxrender-dev libxtst-dev libxt-dev \
+            libxrandr-dev \
+            libcups2-dev libfontconfig1-dev \
+            libasound2-dev libfreetype-dev \
+            zip unzip
+
+      - name: Install boot JDK (labs-openjdk riscv64 25.0.2)
+        run: |
+          BOOT_JDK_URL="https://github.com/gounthar/labs-openjdk/releases/download"
+          BOOT_JDK_URL="${BOOT_JDK_URL}/jvmci-25.1-b17"
+          BOOT_JDK_FILE="labsjdk-ce-25.0.2+10-jvmci-25.1-b17-linux-riscv64.tar.gz"
+          BOOT_JDK_URL="${BOOT_JDK_URL}/${BOOT_JDK_FILE}"
+          curl -sL "$BOOT_JDK_URL" | sudo tar -xz -C /opt/
+          JDK_DIR=/opt/labsjdk-ce-25.0.2-jvmci-25.1-b17
+          echo "JAVA_HOME=$JDK_DIR" >> "$GITHUB_ENV"
+          echo "$JDK_DIR/bin" >> "$GITHUB_PATH"
+
+      - name: Verify boot JDK
+        run: java -version
+
+      - name: Configure
+        run: |
+          bash configure \
+            --with-jvm-features=jvmci \
+            --with-jvm-variants=server \
+            --disable-warnings-as-errors \
+            --with-extra-cflags="-fcommon"
+
+      - name: Build images and static-libs
+        run: time make images static-libs-image JOBS=$(nproc)
+
+      - name: Package artifact
+        run: |
+          BUILD_DIR=build/linux-riscv64-server-release/images
+          STAGING=labsjdk-ce-25.0.2-jvmci-25.1-b17
+          TARBALL=labsjdk-ce-25.0.2+10-jvmci-25.1-b17-linux-riscv64.tar.gz
+
+          cp -a "$BUILD_DIR/jdk" "$STAGING"
+          mkdir -p "$STAGING/lib/static/linux-riscv64/glibc"
+          cp "$BUILD_DIR/static-libs/lib/"*.a \
+             "$STAGING/lib/static/linux-riscv64/glibc/"
+
+          tar -czf "$TARBALL" "$STAGING/"
+          ls -lh "$TARBALL"
+          tar -tzf "$TARBALL" | grep "static/" | head -5
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: labsjdk-riscv64
+          path: "*.tar.gz"
+          retention-days: 30
