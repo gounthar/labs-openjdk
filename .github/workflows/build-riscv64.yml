@@ -30,6 +30,10 @@ name: Build riscv64
     tags:
       - 'jvmci-*'
   workflow_dispatch:
+    inputs:
+      jvmci_tag:
+        description: 'JVMCI release tag to build (e.g. jvmci-25.1-b17)'
+        required: true
 
 jobs:
   build-riscv64:
@@ -53,7 +57,11 @@ jobs:
           FEATURE=$(grep '^DEFAULT_VERSION_FEATURE=' "$VER_FILE" | cut -d= -f2)
           INTERIM=$(grep '^DEFAULT_VERSION_INTERIM=' "$VER_FILE" | cut -d= -f2)
           UPDATE=$(grep '^DEFAULT_VERSION_UPDATE=' "$VER_FILE" | cut -d= -f2)
-          TAG="${GITHUB_REF_NAME:-manual}"
+          TAG="${{ inputs.jvmci_tag || github.ref_name }}"
+          if ! printf '%s' "$TAG" | grep -Eq '^jvmci-[0-9]+(\.[0-9]+)*-b[0-9]+$'; then
+            echo "ERROR: expected a JVMCI release tag (e.g. jvmci-25.1-b17), got: $TAG" >&2
+            exit 1
+          fi
 
           JDK_VERSION="${FEATURE}.${INTERIM}.${UPDATE}"
 
@@ -65,8 +73,8 @@ jobs:
             2>/dev/null \
             | sed -n 's/.*+\([0-9][0-9]*\)-.*/\1/p')
           if [ -z "$BUILD" ]; then
-            echo "WARNING: could not read build number from upstream aarch64 asset; defaulting to 0" >&2
-            BUILD=0
+            echo "ERROR: could not resolve build number from upstream aarch64 asset for ${TAG}" >&2
+            exit 1
           fi
 
           STAGING="labsjdk-ce-${JDK_VERSION}-${TAG}"
