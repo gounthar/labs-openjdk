@@ -3,8 +3,8 @@ name: Build riscv64
 
 "on":
   push:
-    branches:
-      - feat/riscv64-ci
+    tags:
+      - 'jvmci-*'
   workflow_dispatch:
 
 jobs:
@@ -18,6 +18,26 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Determine version strings
+        id: ver
+        run: |
+          VER_FILE=make/conf/version-numbers.conf
+          FEATURE=$(grep '^DEFAULT_VERSION_FEATURE=' "$VER_FILE" | cut -d= -f2)
+          INTERIM=$(grep '^DEFAULT_VERSION_INTERIM=' "$VER_FILE" | cut -d= -f2)
+          UPDATE=$(grep '^DEFAULT_VERSION_UPDATE=' "$VER_FILE" | cut -d= -f2)
+          BUILD=$(grep '^DEFAULT_VERSION_BUILD=' "$VER_FILE" | cut -d= -f2)
+          TAG="${GITHUB_REF_NAME:-manual}"
+
+          JDK_VERSION="${FEATURE}.${INTERIM}.${UPDATE}"
+          STAGING="labsjdk-ce-${JDK_VERSION}-${TAG}"
+          TARBALL="labsjdk-ce-${JDK_VERSION}+${BUILD}-${TAG}-linux-riscv64.tar.gz"
+
+          echo "feature=${FEATURE}"         >> "$GITHUB_OUTPUT"
+          echo "jdk_version=${JDK_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}"                 >> "$GITHUB_OUTPUT"
+          echo "staging=${STAGING}"         >> "$GITHUB_OUTPUT"
+          echo "tarball=${TARBALL}"         >> "$GITHUB_OUTPUT"
+
       - name: Install build prerequisites
         run: |
           sudo apt-get update -q
@@ -29,16 +49,51 @@ jobs:
             libasound2-dev libfreetype-dev \
             zip unzip
 
-      - name: Install boot JDK (labs-openjdk riscv64 25.0.2)
+      - name: Install boot JDK
         run: |
-          BOOT_JDK_URL="https://github.com/gounthar/labs-openjdk/releases/download"
-          BOOT_JDK_URL="${BOOT_JDK_URL}/jvmci-25.1-b17"
-          BOOT_JDK_FILE="labsjdk-ce-25.0.2+10-jvmci-25.1-b17-linux-riscv64.tar.gz"
-          BOOT_JDK_URL="${BOOT_JDK_URL}/${BOOT_JDK_FILE}"
-          curl -sL "$BOOT_JDK_URL" | sudo tar -xz -C /opt/
-          JDK_DIR=/opt/labsjdk-ce-25.0.2-jvmci-25.1-b17
-          echo "JAVA_HOME=$JDK_DIR" >> "$GITHUB_ENV"
-          echo "$JDK_DIR/bin" >> "$GITHUB_PATH"
+          VER_FILE=make/conf/version-numbers.conf
+          # "24 25" → try highest version first
+          ACCEPTABLE=$(grep '^DEFAULT_ACCEPTABLE_BOOT_VERSIONS=' "$VER_FILE" \
+            | cut -d'"' -f2 | tr ' ' '\n' | sort -rn)
+
+          BOOT_DIR=/opt/boot-jdk
+          mkdir -p "$BOOT_DIR"
+
+          # Strategy 1: Temurin for each acceptable version (highest first)
+          for VER in $ACCEPTABLE; do
+            ASSET_URL=$(curl -sf \
+              "https://api.adoptium.net/v3/assets/latest/${VER}/hotspot?architecture=riscv64&image_type=jdk&jvm_impl=hotspot&os=linux&vendor=eclipse" \
+              | grep -o '"link":"[^"]*"' | head -1 | cut -d'"' -f4)
+            if [ -n "$ASSET_URL" ]; then
+              echo "Fetching Temurin JDK ${VER} riscv64..."
+              curl -sL "$ASSET_URL" | tar -xz -C "$BOOT_DIR" --strip-components=1
+              break
+            fi
+          done
+
+          # Strategy 2: latest riscv64 artifact published in this repo
+          if [ ! -x "$BOOT_DIR/bin/java" ]; then
+            echo "Temurin not available, checking repo releases..."
+            ASSET_URL=$(gh api "repos/${{ github.repository }}/releases" \
+              --jq '[.[].assets[] | select(.name | test("linux-riscv64\\.tar\\.gz$"))] | sort_by(.updated_at) | last | .browser_download_url' \
+              2>/dev/null || true)
+            if [ -n "$ASSET_URL" ] && [ "$ASSET_URL" != "null" ]; then
+              echo "Fetching boot JDK from repo releases..."
+              curl -sL "$ASSET_URL" | tar -xz -C "$BOOT_DIR" --strip-components=1
+            fi
+          fi
+
+          if [ ! -x "$BOOT_DIR/bin/java" ]; then
+            echo "ERROR: No suitable boot JDK found for riscv64." >&2
+            echo "Acceptable versions: $ACCEPTABLE" >&2
+            echo "Add LINUX_RISCV64_BOOT_JDK_URL to make/conf/github-actions.conf" >&2
+            exit 1
+          fi
+
+          echo "JAVA_HOME=$BOOT_DIR" >> "$GITHUB_ENV"
+          echo "$BOOT_DIR/bin"       >> "$GITHUB_PATH"
+        env:
+          GH_TOKEN: ${{ github.token }}
 
       - name: Verify boot JDK
         run: java -version
@@ -49,7 +104,8 @@ jobs:
             --with-jvm-features=jvmci \
             --with-jvm-variants=server \
             --disable-warnings-as-errors \
-            --with-extra-cflags="-fcommon"
+            --with-extra-cflags="-fcommon" \
+            --with-boot-jdk="$JAVA_HOME"
 
       - name: Build images and static-libs
         run: time make images static-libs-image JOBS=$(nproc)
@@ -57,8 +113,8 @@ jobs:
       - name: Package artifact
         run: |
           BUILD_DIR=build/linux-riscv64-server-release/images
-          STAGING=labsjdk-ce-25.0.2-jvmci-25.1-b17
-          TARBALL=labsjdk-ce-25.0.2+10-jvmci-25.1-b17-linux-riscv64.tar.gz
+          STAGING="${{ steps.ver.outputs.staging }}"
+          TARBALL="${{ steps.ver.outputs.tarball }}"
 
           cp -a "$BUILD_DIR/jdk" "$STAGING"
           mkdir -p "$STAGING/lib/static/linux-riscv64/glibc"
@@ -67,6 +123,7 @@ jobs:
 
           tar -czf "$TARBALL" "$STAGING/"
           ls -lh "$TARBALL"
+          echo "Static libs:"
           tar -tzf "$TARBALL" | grep "static/" | head -5
 
       - name: Upload artifact
@@ -74,4 +131,20 @@ jobs:
         with:
           name: labsjdk-riscv64
           path: "*.tar.gz"
-          retention-days: 30
+          retention-days: 90
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          TARBALL="${{ steps.ver.outputs.tarball }}"
+          TAG="${{ steps.ver.outputs.tag }}"
+          if gh release view "$TAG" &>/dev/null; then
+            gh release upload "$TAG" "$TARBALL" --clobber
+          else
+            gh release create "$TAG" \
+              --title "$TAG" \
+              --notes "riscv64 build of labs-openjdk at tag ${TAG}" \
+              "$TARBALL"
+          fi
+        env:
+          GH_TOKEN: ${{ github.token }}
