@@ -1,3 +1,27 @@
+#
+# Copyright (c) 2024, Oracle and/or its affiliates. All rights reserved.
+# DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+#
+# This code is free software; you can redistribute it and/or modify it
+# under the terms of the GNU General Public License version 2 only, as
+# published by the Free Software Foundation.  Oracle designates this
+# particular file as subject to the "Classpath" exception as provided
+# by Oracle in the LICENSE file that accompanied this code.
+#
+# This code is distributed in the hope that it will be useful, but WITHOUT
+# ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+# FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+# version 2 for more details (a copy is included in the LICENSE file that
+# accompanied this code).
+#
+# You should have received a copy of the GNU General Public License version
+# 2 along with this work; if not, write to the Free Software Foundation,
+# Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
+#
+# Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
+# or visit www.oracle.com if you need additional information or have any
+# questions.
+#
 ---
 name: Build riscv64
 
@@ -12,6 +36,8 @@ jobs:
     name: Build labs-openjdk for linux/riscv64
     runs-on: ubuntu-24.04-riscv
     timeout-minutes: 300
+    permissions:
+      contents: write
 
     steps:
       - uses: actions/checkout@v4
@@ -20,20 +46,35 @@ jobs:
 
       - name: Determine version strings
         id: ver
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           VER_FILE=make/conf/version-numbers.conf
           FEATURE=$(grep '^DEFAULT_VERSION_FEATURE=' "$VER_FILE" | cut -d= -f2)
           INTERIM=$(grep '^DEFAULT_VERSION_INTERIM=' "$VER_FILE" | cut -d= -f2)
           UPDATE=$(grep '^DEFAULT_VERSION_UPDATE=' "$VER_FILE" | cut -d= -f2)
-          BUILD=$(grep '^DEFAULT_VERSION_BUILD=' "$VER_FILE" | cut -d= -f2)
           TAG="${GITHUB_REF_NAME:-manual}"
 
           JDK_VERSION="${FEATURE}.${INTERIM}.${UPDATE}"
+
+          # Derive the JDK build number (+NN) from the upstream aarch64 artifact
+          # for the same jvmci tag.  This keeps our artifact name in sync with
+          # what mx's suite.py expects (e.g. labsjdk-ce-25.0.2+10-jvmci-25.1-b17-...).
+          BUILD=$(gh api "repos/graalvm/labs-openjdk/releases/tags/${TAG}" \
+            --jq '[.assets[] | select(.name | test("linux-aarch64\\.tar\\.gz$")) | .name] | first' \
+            2>/dev/null \
+            | sed -n 's/.*+\([0-9][0-9]*\)-.*/\1/p')
+          if [ -z "$BUILD" ]; then
+            echo "WARNING: could not read build number from upstream aarch64 asset; defaulting to 0" >&2
+            BUILD=0
+          fi
+
           STAGING="labsjdk-ce-${JDK_VERSION}-${TAG}"
           TARBALL="labsjdk-ce-${JDK_VERSION}+${BUILD}-${TAG}-linux-riscv64.tar.gz"
 
           echo "feature=${FEATURE}"         >> "$GITHUB_OUTPUT"
           echo "jdk_version=${JDK_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "build=${BUILD}"             >> "$GITHUB_OUTPUT"
           echo "tag=${TAG}"                 >> "$GITHUB_OUTPUT"
           echo "staging=${STAGING}"         >> "$GITHUB_OUTPUT"
           echo "tarball=${TARBALL}"         >> "$GITHUB_OUTPUT"
@@ -86,7 +127,6 @@ jobs:
           if [ ! -x "$BOOT_DIR/bin/java" ]; then
             echo "ERROR: No suitable boot JDK found for riscv64." >&2
             echo "Acceptable versions: $ACCEPTABLE" >&2
-            echo "Add LINUX_RISCV64_BOOT_JDK_URL to make/conf/github-actions.conf" >&2
             exit 1
           fi
 
@@ -105,14 +145,19 @@ jobs:
             --with-jvm-variants=server \
             --disable-warnings-as-errors \
             --with-extra-cflags="-fcommon" \
-            --with-boot-jdk="$JAVA_HOME"
+            --with-boot-jdk="$JAVA_HOME" \
+            --with-version-build="${{ steps.ver.outputs.build }}"
 
       - name: Build images and static-libs
         run: time make images static-libs-image JOBS=$(nproc)
 
       - name: Package artifact
         run: |
-          BUILD_DIR=build/linux-riscv64-server-release/images
+          BUILD_DIR=$(ls -d build/linux-riscv64-*-release/images 2>/dev/null | head -1)
+          if [ -z "$BUILD_DIR" ]; then
+            echo "ERROR: could not find build output directory" >&2
+            exit 1
+          fi
           STAGING="${{ steps.ver.outputs.staging }}"
           TARBALL="${{ steps.ver.outputs.tarball }}"
 
