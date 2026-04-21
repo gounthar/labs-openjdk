@@ -25,3 +25,8 @@ NashornProfile.txt
 **/core.[0-9]*
 *.rej
 *.orig
+
+# Claude/AI config
+CLAUDE.md
+CONTEXT.md
+.claude/
