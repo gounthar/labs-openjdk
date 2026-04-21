@@ -30,3 +30,6 @@ NashornProfile.txt
 CLAUDE.md
 CONTEXT.md
 .claude/
+*.draft.md
+*-draft.md
+blog-series-outline.md
