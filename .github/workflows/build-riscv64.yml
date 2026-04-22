@@ -147,6 +147,9 @@ jobs:
         run: java -version
 
       - name: Configure
+        env:
+          VERSION_BUILD: ${{ steps.ver.outputs.build }}
+          VERSION_OPT: ${{ steps.ver.outputs.tag }}
         run: |
           bash configure \
             --with-jvm-features=jvmci \
@@ -154,50 +157,56 @@ jobs:
             --disable-warnings-as-errors \
             --with-extra-cflags="-fcommon" \
             --with-boot-jdk="$JAVA_HOME" \
-            --with-version-build="${{ steps.ver.outputs.build }}"
+            --with-version-build="$VERSION_BUILD" \
+            --with-version-opt="$VERSION_OPT"
 
       - name: Build images and static-libs
         run: time make images static-libs-image JOBS=$(nproc)
 
       - name: Package artifact
+        env:
+          STAGING: ${{ steps.ver.outputs.staging }}
+          TARBALL: ${{ steps.ver.outputs.tarball }}
         run: |
           BUILD_DIR=$(ls -d build/linux-riscv64-*-release/images 2>/dev/null | head -1)
           if [ -z "$BUILD_DIR" ]; then
             echo "ERROR: could not find build output directory" >&2
             exit 1
           fi
-          STAGING="${{ steps.ver.outputs.staging }}"
-          TARBALL="${{ steps.ver.outputs.tarball }}"
 
           cp -a "$BUILD_DIR/jdk" "$STAGING"
           mkdir -p "$STAGING/lib/static/linux-riscv64/glibc"
-          cp "$BUILD_DIR/static-libs/lib/"*.a \
-             "$STAGING/lib/static/linux-riscv64/glibc/"
+          # Copy all .a files recursively, flattening into glibc/ (server/libjvm.a → glibc/libjvm.a)
+          find "$BUILD_DIR/static-libs/lib" -name '*.a' \
+            -exec cp {} "$STAGING/lib/static/linux-riscv64/glibc/" \;
 
           tar -czf "$TARBALL" "$STAGING/"
-          ls -lh "$TARBALL"
+          sha1sum "$TARBALL" | awk '{print $1}' > "${TARBALL}.sha1"
+          ls -lh "$TARBALL" "${TARBALL}.sha1"
           echo "Static libs:"
-          tar -tzf "$TARBALL" | grep "static/" | head -5
+          tar -tzf "$TARBALL" | grep "static/" | head -10
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: labsjdk-riscv64
-          path: "*.tar.gz"
+          path: |
+            *.tar.gz
+            *.tar.gz.sha1
           retention-days: 90
 
       - name: Publish release
         if: startsWith(github.ref, 'refs/tags/')
+        env:
+          TARBALL: ${{ steps.ver.outputs.tarball }}
+          TAG: ${{ steps.ver.outputs.tag }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-          TARBALL="${{ steps.ver.outputs.tarball }}"
-          TAG="${{ steps.ver.outputs.tag }}"
           if gh release view "$TAG" &>/dev/null; then
-            gh release upload "$TAG" "$TARBALL" --clobber
+            gh release upload "$TAG" "$TARBALL" "${TARBALL}.sha1" --clobber
           else
             gh release create "$TAG" \
               --title "$TAG" \
               --notes "riscv64 build of labs-openjdk at tag ${TAG}" \
-              "$TARBALL"
+              "$TARBALL" "${TARBALL}.sha1"
           fi
-        env:
-          GH_TOKEN: ${{ github.token }}
